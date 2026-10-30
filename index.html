@@ -291,20 +291,39 @@ async function searchCourses(q){
   }catch{ if(seq===searchSeq) setResults('<div class="sr-msg">Search isn\'t responding right now. You can keep the name you typed.</div>'); }
 }
 function milesBetween(a,b,c,d){const R0=3958.8,t=x=>x*Math.PI/180,dl=t(c-a),dn=t(d-b),h=Math.sin(dl/2)**2+Math.cos(t(a))*Math.cos(t(c))*Math.sin(dn/2)**2;return 2*R0*Math.asin(Math.sqrt(h))}
+function withTimeout(url,opts,ms){const c=new AbortController();const t=setTimeout(()=>c.abort(),ms);return fetch(url,{...opts,signal:c.signal}).finally(()=>clearTimeout(t))}
+async function overpassNear(la,lo){
+  const q=`[out:json][timeout:15];(way["leisure"="golf_course"](around:40000,${la},${lo});relation["leisure"="golf_course"](around:40000,${la},${lo}););out center tags;`;
+  const servers=['https://overpass-api.de/api/interpreter','https://overpass.kumi.systems/api/interpreter'];
+  for(const url of servers){
+    try{
+      const res=await withTimeout(url,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'data='+encodeURIComponent(q)},12000);
+      if(!res.ok) continue;
+      const data=await res.json();
+      return (data.elements||[]).filter(e=>e.tags&&e.tags.name&&e.center).map(e=>({name:e.tags.name,d:milesBetween(la,lo,e.center.lat,e.center.lon)}));
+    }catch{}
+  }
+  throw new Error('overpass');
+}
+async function nominatimNear(la,lo){
+  const dLat=0.37, dLon=0.37/Math.max(0.2,Math.cos(la*Math.PI/180));
+  const vb=[lo-dLon,la+dLat,lo+dLon,la-dLat].map(x=>x.toFixed(4)).join(',');
+  const res=await withTimeout('https://nominatim.openstreetmap.org/search?format=jsonv2&bounded=1&limit=25&q=golf%20course&viewbox='+vb,{headers:{Accept:'application/json'}},12000);
+  if(!res.ok) throw new Error('nominatim');
+  return (await res.json()).filter(r=>r.name).map(r=>({name:r.name,d:milesBetween(la,lo,+r.lat,+r.lon)}));
+}
 function nearMe(){
   if(!navigator.geolocation){ setResults('<div class="sr-msg">Location isn\'t available on this device.</div>'); return; }
   const seq=++searchSeq; setResults('<div class="sr-msg">Finding courses near you…</div>');
   navigator.geolocation.getCurrentPosition(async pos=>{
     const {latitude:la,longitude:lo}=pos.coords;
-    const q=`[out:json][timeout:20];(way["leisure"="golf_course"](around:40000,${la},${lo});relation["leisure"="golf_course"](around:40000,${la},${lo}););out center tags;`;
-    try{
-      const res=await fetch('https://overpass-api.de/api/interpreter',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'data='+encodeURIComponent(q)});
-      if(!res.ok) throw 0;
-      const data=await res.json();
-      const list=(data.elements||[]).filter(e=>e.tags&&e.tags.name&&e.center).map(e=>({name:e.tags.name,d:milesBetween(la,lo,e.center.lat,e.center.lon)}))
-        .sort((a,b)=>a.d-b.d).filter((c,i,arr)=>arr.findIndex(x=>x.name===c.name)===i).slice(0,8).map(c=>({name:c.name,where:c.d.toFixed(1)+' mi'}));
-      if(seq===searchSeq) setResults(resultBtns(list));
-    }catch{ if(seq===searchSeq) setResults('<div class="sr-msg">Nearby search isn\'t responding right now. Try typing the name.</div>'); }
+    const got=await Promise.allSettled([overpassNear(la,lo),nominatimNear(la,lo)]);
+    if(seq!==searchSeq) return;
+    const all=got.filter(g=>g.status==='fulfilled').flatMap(g=>g.value);
+    if(!all.length&&got.every(g=>g.status==='rejected')){ setResults('<div class="sr-msg">Nearby search isn\'t responding right now. Try typing the course name.</div>'); return; }
+    const seen=new Set();
+    const list=all.sort((a,b)=>a.d-b.d).filter(c=>{const k=c.name.toLowerCase();if(seen.has(k))return false;seen.add(k);return true}).slice(0,10).map(c=>({name:c.name,where:c.d.toFixed(1)+' mi'}));
+    setResults(resultBtns(list));
   },()=>{ if(seq===searchSeq) setResults('<div class="sr-msg">Location permission is off. Type the course name instead.</div>'); },{timeout:12000,maximumAge:600000});
 }
 
